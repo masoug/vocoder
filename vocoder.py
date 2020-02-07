@@ -2,7 +2,7 @@ import sys
 import argparse
 import wavio
 import numpy as np
-from scipy.fft import fft, ifft, fftfreq
+from scipy.fft import rfft, irfft, rfftfreq
 import matplotlib.pyplot as plt
 
 FFT_WINDOW = 1024
@@ -52,6 +52,13 @@ if __name__ == '__main__':
     argparser.add_argument('-f', '--frequency',
                            help='Show the frequency spectrum of the first fft window.',
                            action='store_true')
+    argparser.add_argument('-o', '--show_output',
+                           help='Show the output synthesized waveform.',
+                           action='store_true')
+    argparser.add_argument('-g', '--voice_gain',
+                           type=float,
+                           help='Accentuate the higher-frequency components of the voice signal, to make the spoken'
+                                'words sound clearer in the synthesized signal. Experiment with values from 10.0-100.0')
 
     args = argparser.parse_args()
 
@@ -105,7 +112,8 @@ if __name__ == '__main__':
     # process the audio file by looping through the signal data in FFT_WINDOW steps
     start = 0
     end = start + FFT_WINDOW
-    output_signal = np.empty(total_samples)
+    output_signal = np.zeros(total_samples)
+    hanning = np.hanning(FFT_WINDOW)
     while end <= total_samples:
         modulator_window = modulator_data[start:end]
         carrier_window = carrier_data[start:end]
@@ -113,47 +121,58 @@ if __name__ == '__main__':
         assert len(carrier_window) == FFT_WINDOW
 
         # the modulator and carrier signals are split into multiple frequency bands
-        modulator_fft = fft(modulator_window)
-        carrier_fft = fft(carrier_window)
-        # hanning = np.hanning(len(modulator_window))
-        # modulator_fft = fft(np.multiply(modulator_window, hanning))
-        # carrier_fft = fft(np.multiply(carrier_window, hanning))
+        modulator_window = np.multiply(modulator_window, hanning)   # the taper the ends of the window signal using a
+        carrier_window = np.multiply(carrier_window, hanning)       # hanning window. Combined with the overlapping
+        modulator_fft = rfft(modulator_window)                      # FFT windows, this reduces the buzzing caused by
+        carrier_fft = rfft(carrier_window)                          # discontinuities between reconstructed FFT windows.
         assert len(modulator_fft) == len(carrier_fft)
 
         if args.frequency:
             # fft is symmetric, so we only need to use half
-            half = int(len(modulator_fft)/2)
-            freqs = fftfreq(FFT_WINDOW, d=1./modulator_wav.rate)[:half]
+            freqs = rfftfreq(FFT_WINDOW, d=1./modulator_wav.rate)
             plt.clf()
             plt.subplot(211)
             plt.title('Modulator FFT')
-            plt.plot(freqs, np.abs(modulator_fft[:half]))
+            plt.plot(freqs, np.abs(modulator_fft))
             plt.subplot(212)
             plt.title('Carrier FFT')
-            plt.plot(freqs, np.abs(carrier_fft[:half]))
+            plt.plot(freqs, np.abs(carrier_fft))
             plt.xlabel('Frequency (Hz)')
             plt.show()
             sys.exit(0)
 
         # the level of each modulator band (average value) serves as the gain for the carrier band
-        num_sym_bands = NUM_BANDS * 2
-        band_width = int(len(modulator_fft) / num_sym_bands)
+        band_width = int(len(modulator_fft) / NUM_BANDS)
         band_start = 0
         band_end = band_start + band_width
         synthesized_fft = np.empty(len(modulator_fft), dtype=np.complex128)
         while band_end <= len(modulator_fft):
-            gain = 0.001 * np.mean(np.abs(modulator_fft[band_start:band_end]))
+            gain = np.mean(np.abs(modulator_fft[band_start:band_end]))
+
+            if args.voice_gain:
+                # to reduce the amount of "murmuring" for the output voice, boost the gain on higher frequencies,
+                # making the voices sound a little clearer for the synthesized output.
+                gain *= 1.0 + (args.voice_gain * band_start / len(modulator_fft))
 
             synthesized_fft[band_start:band_end] = gain * carrier_fft[band_start:band_end]
-            # synthesized_fft[band_start:band_end] = carrier_fft[band_start:band_end]
+            # synthesized_fft[band_start:band_end] = modulator_fft[band_start:band_end]
 
             band_start = band_end
             band_end = band_start + band_width
 
-        output_signal[start:end] = ifft(synthesized_fft).real
+        output_signal[start:end] += irfft(synthesized_fft).real
 
-        start = end
+        start = int(start + WINDOW_OVERLAP * FFT_WINDOW)
         end = start + FFT_WINDOW
+
+    normalizer = np.max(np.abs(output_signal))
+    output_signal = 0.9 * output_signal / normalizer
+    if args.show_output:
+        plt.clf()
+        plt.title('Synthesized Waveform')
+        plt.plot(np.arange(output_signal.shape[0]) / modulator_wav.rate, output_signal)
+        plt.show()
+        sys.exit()
 
     print('Saving synthesized output...')
     output_signal = (32768. * output_signal).astype(np.int16)
